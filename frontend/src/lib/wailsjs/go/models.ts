@@ -55,6 +55,7 @@ export namespace marasi {
 	    VimEnabled: boolean;
 	    DefaultAddress: string;
 	    DefaultPort: string;
+	    LineWrap: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -67,6 +68,7 @@ export namespace marasi {
 	        this.VimEnabled = source["VimEnabled"];
 	        this.DefaultAddress = source["DefaultAddress"];
 	        this.DefaultPort = source["DefaultPort"];
+	        this.LineWrap = source["LineWrap"];
 	    }
 	}
 	export class ExtensionLog {
