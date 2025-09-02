@@ -35,7 +35,7 @@
         SquarePlay,
         ToggleLeft,
     } from "lucide-svelte";
-    import { checkpointCode, marasiConfig, interceptFlag } from "../../stores";
+    import { checkpointCode, marasiConfig, interceptFlag, lineWrap} from "../../stores";
     const toastStore = getToastStore();
     const drawerStore = getDrawerStore();
 
@@ -330,5 +330,5 @@
     class="text-xs"
     theme={oneDark}
     extensions={$marasiConfig.VimEnabled ? [vim()] : []}
+    lineWrapping={$lineWrap}
 />
-
