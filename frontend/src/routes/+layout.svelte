@@ -55,7 +55,7 @@
         StartProxy,
     } from "../lib/wailsjs/go/main/App";
     import WebComponentWrapper from "../lib/components/WebComponentWrapper.svelte";
-    import { ChefHat, Brush} from "lucide-svelte";
+import { ChefHat, Brush, Braces} from "lucide-svelte";
     import MenuModal from "../lib/components/MenuModal.svelte";
     import MetadataModal from "../lib/components/MetadataModal.svelte";
     import InterfaceModal from "../lib/components/InterfaceModal.svelte";
@@ -349,6 +349,23 @@
                         </div>
                     </svelte:fragment>
                     <span>Filters</span>
+                </AppRailAnchor>
+                <AppRailAnchor
+                    selected={$page.url.pathname === "/helpers"}
+                    on:click={() => {
+                        goto("/helpers");
+                    }}
+                    bind:group={currentTile}
+                    name="Helpers"
+                    value={appRailIndex++}
+                    title="Helpers"
+                >
+                    <svelte:fragment slot="lead">
+                        <div class="flex justify-center items-center w-full">
+                            <Braces />
+                        </div>
+                    </svelte:fragment>
+                    <span>Helpers</span>
                 </AppRailAnchor>
                 <AppRailAnchor
                     selected={$page.url.pathname === "/compass"}

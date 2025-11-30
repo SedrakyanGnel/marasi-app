@@ -1,20 +1,3 @@
-const canDecodeBuffer =
-  typeof Buffer !== "undefined" && typeof Buffer.from === "function";
-
-function decodeBase64(chunk) {
-  try {
-    if (typeof atob === "function") {
-      return atob(chunk);
-    }
-    if (canDecodeBuffer) {
-      return Buffer.from(chunk, "base64").toString("utf-8");
-    }
-  } catch (error) {
-    console.error("Base64 decode failed", error);
-  }
-  return "";
-}
-
 function ensureArray(value) {
   if (value === undefined || value === null) return [];
   if (Array.isArray(value)) {
@@ -113,36 +96,40 @@ function equalityComparator(a, b, invert = false) {
   return invert ? !result : result;
 }
 
-const helperLibrary = {
-  hasBase64Url(input) {
-    const haystack = ensureString(input);
-    if (!haystack) return false;
-    const pattern = /(?:[A-Za-z0-9+/]{12,}={0,2})/g;
-    let match;
-    while ((match = pattern.exec(haystack)) !== null) {
-      const decoded = decodeBase64(match[0]);
-      if (decoded && /https?:\/\//i.test(decoded)) {
-        return true;
-      }
+const helperLibrary = {};
+
+function extractFunctionHelpers(extra = {}) {
+  const result = {};
+  if (!extra || typeof extra !== "object") return result;
+  Object.entries(extra).forEach(([key, value]) => {
+    if (typeof value === "function") {
+      result[key] = value;
     }
-    return false;
-  },
-  reflects(source, target) {
-    const sourceValues = Array.from(
-      new Set(
-        ensureArray(source)
-          .map((entry) => ensureString(entry).trim())
-          .filter((entry) => entry.length > 3),
-      ),
-    );
-    if (sourceValues.length === 0) return false;
-    const targetString = ensureString(target).toLowerCase();
-    if (!targetString) return false;
-    return sourceValues.some((value) =>
-      targetString.includes(value.toLowerCase()),
-    );
-  },
-};
+  });
+  return result;
+}
+
+function mergeHelperLibraries(extra = {}) {
+  return { ...helperLibrary, ...extractFunctionHelpers(extra) };
+}
+
+function helperResultToBoolean(result) {
+  if (result && typeof result === "object") {
+    if ("matched" in result) return Boolean(result.matched);
+    if ("match" in result) return Boolean(result.match);
+    const requestMatches = Array.isArray(result.requestMatches)
+      ? result.requestMatches.length
+      : 0;
+    const responseMatches = Array.isArray(result.responseMatches)
+      ? result.responseMatches.length
+      : 0;
+    if (requestMatches + responseMatches > 0) return true;
+    if ("value" in result) return Boolean(result.value);
+    if ("success" in result) return Boolean(result.success);
+    return Object.keys(result).length > 0;
+  }
+  return Boolean(result);
+}
 
 const KEYWORDS = new Set(["AND", "OR", "NOT"]);
 const COMPARATORS = new Set([
@@ -447,7 +434,17 @@ function getFieldValue(row, path) {
   return current;
 }
 
-function resolveValue(node, row, helpers) {
+function convertHelperResultForQuery(result) {
+  if (result && typeof result === "object") {
+    if ("value" in result && typeof result.value !== "object") {
+      return result.value;
+    }
+    return helperResultToBoolean(result);
+  }
+  return result;
+}
+
+function resolveValue(node, row, helpers, context) {
   if (!node) return undefined;
   switch (node.type) {
     case "value":
@@ -455,13 +452,13 @@ function resolveValue(node, row, helpers) {
     case "field":
       return getFieldValue(row, node.path);
     case "function":
-      return executeHelper(node, row, helpers);
+      return executeHelper(node, row, helpers, context);
     default:
       return undefined;
   }
 }
 
-function executeHelper(node, row, helpers) {
+function executeHelper(node, row, helpers, context) {
   const helperName = node.name.toLowerCase();
   const helperEntry = Object.entries(helpers).find(
     ([key]) => key.toLowerCase() === helperName,
@@ -470,13 +467,27 @@ function executeHelper(node, row, helpers) {
     throw new Error(`Unknown helper function ${node.name}`);
   }
   const [, helperFn] = helperEntry;
-  const resolvedArgs = node.args.map((arg) => resolveValue(arg, row, helpers));
-  return helperFn(...resolvedArgs);
+  const resolvedArgs = node.args.map((arg) =>
+    resolveValue(arg, row, helpers, context),
+  );
+  const result = helperFn(...resolvedArgs);
+  if (context?.captureHelperResult) {
+    try {
+      context.captureHelperResult({
+        name: node.name,
+        args: resolvedArgs,
+        result,
+      });
+    } catch (captureError) {
+      console.error("captureHelperResult failed", captureError);
+    }
+  }
+  return convertHelperResultForQuery(result);
 }
 
-function compareValues(leftNode, rightNode, comparator, row, helpers) {
-  const left = resolveValue(leftNode, row, helpers);
-  const right = resolveValue(rightNode, row, helpers);
+function compareValues(leftNode, rightNode, comparator, row, helpers, context) {
+  const left = resolveValue(leftNode, row, helpers, context);
+  const right = resolveValue(rightNode, row, helpers, context);
   const leftValues = ensureArray(left);
   const rightValues = ensureArray(right);
 
@@ -520,27 +531,36 @@ function compareValues(leftNode, rightNode, comparator, row, helpers) {
   );
 }
 
-function evaluateAst(ast, row, helpers = helperLibrary) {
+function evaluateAst(ast, row, helpers = helperLibrary, context = {}) {
   switch (ast.type) {
     case "binary": {
-      const left = evaluateAst(ast.left, row, helpers);
+      const left = evaluateAst(ast.left, row, helpers, context);
       if (ast.operator === "AND") {
-        return left && evaluateAst(ast.right, row, helpers);
+        return left && evaluateAst(ast.right, row, helpers, context);
       }
-      return left || evaluateAst(ast.right, row, helpers);
+      return left || evaluateAst(ast.right, row, helpers, context);
     }
     case "not":
-      return !evaluateAst(ast.operand, row, helpers);
+      return !evaluateAst(ast.operand, row, helpers, context);
     case "comparison":
-      return compareValues(ast.left, ast.right, ast.comparator, row, helpers);
+      return compareValues(
+        ast.left,
+        ast.right,
+        ast.comparator,
+        row,
+        helpers,
+        context,
+      );
     case "valueCondition":
-      return Boolean(resolveValue(ast.value, row, helpers));
+      return helperResultToBoolean(
+        resolveValue(ast.value, row, helpers, context),
+      );
     default:
       return false;
   }
 }
 
-export function compileHttpql(query) {
+export function compileHttpql(query, userHelpers = {}) {
   const trimmed = query?.trim();
   if (!trimmed) {
     return { ast: null, error: null, test: () => true };
@@ -548,10 +568,30 @@ export function compileHttpql(query) {
   try {
     const tokens = tokenize(trimmed);
     const ast = buildParser(tokens);
+    const baseHelpers = mergeHelperLibraries(userHelpers);
     return {
       ast,
       error: null,
-      test: (row, helpers = helperLibrary) => evaluateAst(ast, row, helpers),
+      test: (row, runtimeOptions = {}) => {
+        let overrideHelpers = {};
+        let captureHelperResult;
+        if (runtimeOptions) {
+          if (
+            "helpers" in runtimeOptions ||
+            "captureHelperResult" in runtimeOptions
+          ) {
+            overrideHelpers = runtimeOptions.helpers ?? {};
+            captureHelperResult = runtimeOptions.captureHelperResult;
+          } else {
+            overrideHelpers = runtimeOptions;
+          }
+        }
+        const helpers = mergeHelperLibraries({
+          ...baseHelpers,
+          ...overrideHelpers,
+        });
+        return evaluateAst(ast, row, helpers, { captureHelperResult });
+      },
     };
   } catch (error) {
     return {

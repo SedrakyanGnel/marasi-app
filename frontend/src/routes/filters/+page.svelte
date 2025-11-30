@@ -13,30 +13,28 @@
 
     const templates = [
         {
-            name: "Base64 URL Hunter",
-            description:
-                "Highlights when request or response bodies leak base64 URLs.",
-            expression:
-                "hasBase64Url(request.body) OR hasBase64Url(response.body)",
-            defaultAction: "highlight",
-            color: "#f97316",
-        },
-        {
-            name: "Reflection Detector",
-            description:
-                "Keeps only rows where params or cookies reflect in responses.",
-            expression:
-                "reflects(request.params, response.body) OR reflects(request.cookies, response.body)",
-            defaultAction: "include",
-            color: "#84cc16",
-        },
-        {
             name: "Server Error JSON",
             description: "Finds JSON responses with status >= 500.",
             expression:
                 "response.status >= 500 AND response.contenttype : json",
             defaultAction: "include",
             color: "#f87171",
+        },
+        {
+            name: "Suspicious Query Tokens",
+            description:
+                "Highlight requests where query strings contain auth tokens.",
+            expression:
+                'request.query : "token=" OR request.query : "auth="',
+            defaultAction: "highlight",
+            color: "#f97316",
+        },
+        {
+            name: "Large Responses",
+            description: "Only show responses larger than 1MB.",
+            expression: "response.length >= 1000000",
+            defaultAction: "include",
+            color: "#22c55e",
         },
     ];
 
@@ -215,7 +213,7 @@
                 <p class={validationError ? "error" : "hint"}>
                     {validationError
                         ? validationError
-                        : "Expression looks valid. Available helpers: hasBase64Url(), reflects()"}
+                        : "Expression looks valid."}
                 </p>
             {/if}
             <label>

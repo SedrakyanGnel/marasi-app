@@ -14,6 +14,7 @@
         proxyItems,
         requestFilterSelections,
         requestFilters,
+        customHttpqlHelpers,
         searchInput,
     } from "../../stores";
     import Sort from "../../lib/components/datatables/Sort.svelte";
@@ -40,6 +41,7 @@
         ListBoxItem,
     } from "@skeletonlabs/skeleton";
     import MarasiKeys from "../../lib/components/MarasiMenu/MarasiKeys.svelte";
+    import { compileHelperDefinitions, getHelperCompletionEntries } from "../../lib/utils/helpers";
     import {
         ArrowLeft,
         ArrowRight,
@@ -62,7 +64,7 @@
         SettingsIcon,
     } from "svelte-feather-icons";
 
-    const HTTPQL_COMPLETIONS = (() => {
+    const HTTPQL_BASE_COMPLETIONS = (() => {
         const primaryFields = [
             {
                 prefix: "request",
@@ -114,7 +116,7 @@
             "contains",
             "matches",
         ];
-        const helpers = ["hasBase64Url(", "reflects(", "AND", "OR", "NOT"];
+        const helpers = ["AND", "OR", "NOT"];
         const completions = new Set();
         primaryFields.forEach(({ prefix, children }) => {
             completions.add(prefix);
@@ -125,6 +127,11 @@
         return Array.from(completions);
     })();
 
+    let helperFunctionMap = {};
+    let helperCompilationErrors = [];
+    let helperCompletionEntries = [];
+    let httpqlCompletionOptions = HTTPQL_BASE_COMPLETIONS;
+
     let isDrawerOpen = false;
     let selectedId = 0;
     let contextMenu;
@@ -132,7 +139,7 @@
     let accOpened = false;
     let menu;
     let highlightAssignments = new Map();
-    let httpqlCompilation = compileHttpql("");
+    let httpqlCompilation = compileHttpql("", helperFunctionMap);
     let httpqlError = "";
     let filterMap = new Map();
     let compiledFilters = new Map();
@@ -670,7 +677,7 @@
             return;
         }
         const prefix = context.qualified.toLowerCase();
-        const matches = HTTPQL_COMPLETIONS.filter((entry) =>
+        const matches = httpqlCompletionOptions.filter((entry) =>
             entry.toLowerCase().startsWith(prefix),
         );
         if (!matches.length) {
@@ -917,13 +924,27 @@
         reselect();
     }
 
+    $: {
+        const { helpers, errors } = compileHelperDefinitions(
+            $customHttpqlHelpers,
+        );
+        helperFunctionMap = helpers;
+        helperCompilationErrors = errors;
+    }
+    $: helperCompletionEntries = getHelperCompletionEntries(
+        $customHttpqlHelpers,
+    );
+    $: httpqlCompletionOptions = Array.from(
+        new Set([...HTTPQL_BASE_COMPLETIONS, ...helperCompletionEntries]),
+    );
+
     $: filterMap = new Map(
         $requestFilters.map((filter) => [filter.id, filter]),
     );
     $: compiledFilters = new Map(
         $requestFilters.map((filter) => [
             filter.id,
-            compileHttpql(filter.expression),
+            compileHttpql(filter.expression, helperFunctionMap),
         ]),
     );
     $: filterErrorMap = new Map(
@@ -946,7 +967,7 @@
         filter,
         selection: selectionMap.get(filter.id),
     }));
-    $: httpqlCompilation = compileHttpql($httpqlQuery);
+    $: httpqlCompilation = compileHttpql($httpqlQuery, helperFunctionMap);
     $: httpqlError = httpqlCompilation.error
         ? httpqlCompilation.error.message
         : "";
@@ -1005,7 +1026,16 @@
                 <Pagination {handler} />
             </footer>
             <section class="httpql-panel">
-                <label for="httpqlInput">HTTPQL Search</label>
+                <div class="httpql-panel__header">
+                    <label for="httpqlInput">HTTPQL Search</label>
+                    <button
+                        type="button"
+                        class="link"
+                        on:click={() => goto("/helpers")}
+                    >
+                        Manage helpers
+                    </button>
+                </div>
                 <div class="httpql-input-wrapper">
                     <textarea
                         id="httpqlInput"
@@ -1066,8 +1096,8 @@
                     <p class="error-label">{httpqlError}</p>
                 {:else if $httpqlQuery.trim().length}
                     <p class="hint">
-                        Matching requests using HTTPQL. Available helpers:
-                        <code>hasBase64Url()</code>, <code>reflects()</code>
+                        Matching requests using HTTPQL. Add reusable helpers
+                        from the Helpers tab to extend autocomplete.
                     </p>
                 {:else}
                     <p class="hint">
@@ -1075,6 +1105,17 @@
                         <code
                             >request.method = POST AND response.status >= 500</code
                         >
+                    </p>
+                {/if}
+                {#if helperCompilationErrors.length}
+                    <p class="error-label helper-error">
+                        Custom helper
+                        {helperCompilationErrors[0]?.name
+                            ? `"${helperCompilationErrors[0].name}"`
+                            : "definition"}
+                        failed to load:
+                        {helperCompilationErrors[0]?.message}. Fix it in the
+                        Helpers tab.
                     </p>
                 {/if}
             </section>
@@ -1434,6 +1475,11 @@
         flex-direction: column;
         gap: 0.4rem;
     }
+    .httpql-panel__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
     .httpql-panel .httpql-input-wrapper {
         position: relative;
         display: flex;
@@ -1636,5 +1682,8 @@
     .error-label {
         font-size: 0.8rem;
         color: #f87171;
+    }
+    .helper-error {
+        margin-top: 0.25rem;
     }
 </style>

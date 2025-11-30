@@ -46,28 +46,7 @@ function generateFilterId() {
   return `filter-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const defaultRequestFilters = [
-  {
-    id: "base64-url-hunter",
-    name: "Base64 URL Hunter",
-    description:
-      "Flags when request or response bodies contain base64 strings that decode to URLs.",
-    expression:
-      "hasBase64Url(request.body) OR hasBase64Url(response.body)",
-    defaultAction: "highlight",
-    color: "#f97316",
-  },
-  {
-    id: "reflection-detector",
-    name: "Reflection Detector",
-    description:
-      "Shows requests whose parameters or cookies are reflected in the response body.",
-    expression:
-      "reflects(request.params, response.body) OR reflects(request.cookies, response.body)",
-    defaultAction: "include",
-    color: "#84cc16",
-  },
-];
+const defaultRequestFilters = [];
 
 // Ledger Stores
 export const searchInput = writable("");
@@ -84,6 +63,10 @@ export const requestFilters = createPersistentStore(
 );
 export const requestFilterSelections = createPersistentStore(
   "marasi.requestFilterSelections",
+  [],
+);
+export const customHttpqlHelpers = createPersistentStore(
+  "marasi.httpqlHelpers",
   [],
 );
 
@@ -122,6 +105,36 @@ export function resetRequestFilters() {
 
 export function clearRequestFilterSelections() {
   requestFilterSelections.set([]);
+}
+
+export function upsertHttpqlHelper(helper) {
+  const normalized = {
+    id: helper.id ?? generateFilterId(),
+    name: helper.name?.trim() || "helper",
+    description: helper.description?.trim() || "",
+    parameters: helper.parameters || "",
+    body: helper.body || "return false;",
+  };
+  customHttpqlHelpers.update((items) => {
+    const index = items.findIndex((entry) => entry.id === normalized.id);
+    if (index >= 0) {
+      const next = [...items];
+      next[index] = normalized;
+      return next;
+    }
+    return [...items, normalized];
+  });
+  return normalized;
+}
+
+export function deleteHttpqlHelper(id) {
+  customHttpqlHelpers.update((items) =>
+    items.filter((entry) => entry.id !== id),
+  );
+}
+
+export function resetHttpqlHelpers() {
+  customHttpqlHelpers.set([]);
 }
 
 // Compass

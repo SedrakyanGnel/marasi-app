@@ -15,6 +15,7 @@
         marasiConfig,
         prettify,
         lineWrap,
+        customHttpqlHelpers,
     } from "../../stores";
     import {
         getModalStore,
@@ -26,6 +27,10 @@
     import { http } from "@codemirror/legacy-modes/mode/http";
     import { oneDark } from "@codemirror/theme-one-dark";
     import { beforeNavigate, goto } from "$app/navigation";
+    import { compileHelperDefinitions } from "../utils/helpers";
+    import { compileHttpql } from "../utils/httpql";
+    import { EditorView, Decoration } from "@codemirror/view";
+    import { StateEffect, StateField, RangeSetBuilder } from "@codemirror/state";
 
     const modalStore = getModalStore();
     const drawerStore = getDrawerStore();
@@ -40,8 +45,42 @@
     export let requestBody;
 
     let responseBody, selectedRow;
+    let requestEditorView;
+    let responseEditorView;
+    let searchMode = "text";
+    let searchQuery = "";
+    let caseSensitiveSearch = false;
+    let helperQuery = "";
+    let helperMatchesSummary = [];
+    let helperSearchError = "";
+    let helperFunctionMap = {};
+    let helperCompilationErrors = [];
+    let requestHighlights = [];
+    let responseHighlights = [];
+    let textMatchCount = 0;
 
     let userEdited = false;
+    const highlightMark = Decoration.mark({
+        class: "cm-search-highlight",
+    });
+    const setHighlightsEffect = StateEffect.define();
+    const highlightField = StateField.define({
+        create() {
+            return Decoration.none;
+        },
+        update(highlights, tr) {
+            if (tr.docChanged) {
+                highlights = highlights.map(tr.changes);
+            }
+            for (const effect of tr.effects) {
+                if (effect.is(setHighlightsEffect)) {
+                    highlights = effect.value;
+                }
+            }
+            return highlights;
+        },
+        provide: (field) => EditorView.decorations.from(field),
+    });
     function adjustHeights() {
         const editors = document.querySelectorAll(".cm-editor");
 
@@ -71,6 +110,183 @@
         editors.forEach((editor) => {
             editor.style.height = `${maxHeight}px`;
         });
+    }
+
+    function createDecorations(doc, ranges) {
+        if (!ranges?.length) return Decoration.none;
+        const builder = new RangeSetBuilder();
+        ranges.forEach((range) => {
+            const from = Math.max(0, Math.min(doc.length, range.from));
+            const to = Math.max(0, Math.min(doc.length, range.to));
+            if (to > from) {
+                builder.add(from, to, highlightMark);
+            }
+        });
+        return builder.finish();
+    }
+
+    function updateRequestEditorHighlights(ranges) {
+        if (!requestEditorView) return;
+        requestEditorView.dispatch({
+            effects: setHighlightsEffect.of(
+                createDecorations(requestEditorView.state.doc, ranges),
+            ),
+        });
+    }
+
+    function updateResponseEditorHighlights(ranges) {
+        if (!responseEditorView) return;
+        responseEditorView.dispatch({
+            effects: setHighlightsEffect.of(
+                createDecorations(responseEditorView.state.doc, ranges),
+            ),
+        });
+    }
+
+    function clearHighlights() {
+        requestHighlights = [];
+        responseHighlights = [];
+        textMatchCount = 0;
+        updateRequestEditorHighlights(requestHighlights);
+        updateResponseEditorHighlights(responseHighlights);
+    }
+
+    function findAllOccurrences(text, needle, caseSensitive) {
+        if (!text || !needle) return [];
+        const source = caseSensitive ? text : text.toLowerCase();
+        const query = caseSensitive ? needle : needle.toLowerCase();
+        const ranges = [];
+        if (!query.length) return ranges;
+        let index = 0;
+        while ((index = source.indexOf(query, index)) !== -1) {
+            ranges.push({ from: index, to: index + query.length });
+            index += query.length || 1;
+        }
+        return ranges;
+    }
+
+    function runTextSearch(
+        query,
+        isCaseSensitive,
+        requestText,
+        responseText,
+    ) {
+        if (!query?.length) {
+            clearHighlights();
+            return;
+        }
+        requestHighlights = findAllOccurrences(
+            requestText ?? "",
+            query,
+            isCaseSensitive,
+        );
+        responseHighlights = findAllOccurrences(
+            responseText ?? "",
+            query,
+            isCaseSensitive,
+        );
+        textMatchCount = requestHighlights.length + responseHighlights.length;
+    }
+
+    function normalizeMatchRange(range) {
+        if (!range) return null;
+        if (Array.isArray(range) && range.length >= 2) {
+            const from = Number(range[0]);
+            const to = Number(range[1]);
+            if (Number.isFinite(from) && Number.isFinite(to) && to > from) {
+                return { from, to };
+            }
+            return null;
+        }
+        const from = Number(range.start ?? range.from);
+        const to = Number(range.end ?? range.to);
+        if (Number.isFinite(from) && Number.isFinite(to) && to > from) {
+            return { from, to };
+        }
+        return null;
+    }
+
+    function extractMatches(result, key) {
+        const values =
+            result?.[key] ??
+            result?.[`${key}Matches`] ??
+            result?.[`${key}Match`] ??
+            [];
+        if (!Array.isArray(values)) return [];
+        return values.map(normalizeMatchRange).filter(Boolean);
+    }
+
+    function reduceHelperCaptures(captures) {
+        const requestMatches = [];
+        const responseMatches = [];
+        const summary = [];
+        captures.forEach((capture) => {
+            if (!capture?.result || typeof capture.result !== "object") return;
+            const req = extractMatches(capture.result, "request");
+            const res = extractMatches(capture.result, "response");
+            if (req.length || res.length) {
+                requestMatches.push(...req);
+                responseMatches.push(...res);
+                summary.push({
+                    name: capture.name,
+                    request: req.length,
+                    response: res.length,
+                });
+            }
+        });
+        return { requestMatches, responseMatches, summary };
+    }
+
+    function runHelperSearch() {
+        helperSearchError = "";
+        helperMatchesSummary = [];
+        if (!selectedRow) {
+            helperSearchError = "Request details are still loading.";
+            return;
+        }
+        if (!helperQuery.trim()) {
+            helperSearchError = "Enter a helper expression to run.";
+            return;
+        }
+        const compiled = compileHttpql(helperQuery, helperFunctionMap);
+        if (compiled.error) {
+            helperSearchError = compiled.error.message;
+            return;
+        }
+        const captures = [];
+        const matched = compiled.test(selectedRow, {
+            captureHelperResult: (payload) => {
+                captures.push(payload);
+            },
+        });
+        const aggregated = reduceHelperCaptures(captures);
+        requestHighlights = aggregated.requestMatches;
+        responseHighlights = aggregated.responseMatches;
+        helperMatchesSummary = aggregated.summary;
+        if (!requestHighlights.length && !responseHighlights.length) {
+            helperSearchError = matched
+                ? "Helper matched but did not return match ranges."
+                : "Helper did not match.";
+        } else {
+            helperSearchError = "";
+        }
+    }
+
+    function switchSearchMode(mode) {
+        if (mode === searchMode) return;
+        searchMode = mode;
+        helperSearchError = "";
+        helperMatchesSummary = [];
+        if (mode === "text") {
+            runTextSearch(
+                searchQuery,
+                caseSensitiveSearch,
+                requestBody,
+                responseBody,
+            );
+        } else {
+            clearHighlights();
+        }
     }
 
     // Get lang based on body length and config
@@ -210,6 +426,26 @@
     });
 
     $: {
+        const { helpers, errors } = compileHelperDefinitions(
+            $customHttpqlHelpers,
+        );
+        helperFunctionMap = helpers;
+        helperCompilationErrors = errors;
+    }
+
+    $: if (searchMode === "text") {
+        runTextSearch(
+            searchQuery,
+            caseSensitiveSearch,
+            requestBody,
+            responseBody,
+        );
+    }
+
+    $: updateRequestEditorHighlights(requestHighlights);
+    $: updateResponseEditorHighlights(responseHighlights);
+
+    $: {
         // If the editors are readonly and it's safe to toggle
         if (requestReadOnly && responseReadOnly) {
             if ($prettify) {
@@ -341,10 +577,153 @@
     </div>
 {/if}
 
+<style>
+    .search-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        padding: 0.75rem 1rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        background: rgba(0, 0, 0, 0.2);
+    }
+    .search-mode-toggle {
+        display: inline-flex;
+        gap: 0.5rem;
+    }
+    .search-mode-toggle button {
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: transparent;
+        border-radius: 999px;
+        padding: 0.2rem 0.8rem;
+        font-size: 0.85rem;
+        cursor: pointer;
+        color: inherit;
+    }
+    .search-mode-toggle button.selected {
+        background: rgba(96, 165, 250, 0.2);
+        border-color: rgba(96, 165, 250, 0.5);
+    }
+    .text-search-controls,
+    .helper-search-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    .text-search-controls input,
+    .helper-search-controls textarea {
+        border-radius: 0.6rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(0, 0, 0, 0.3);
+        padding: 0.45rem 0.6rem;
+        color: inherit;
+        font-family: inherit;
+    }
+    .case-toggle {
+        font-size: 0.85rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+    }
+    .helper-actions {
+        display: flex;
+        justify-content: flex-start;
+    }
+    .helper-match-summary {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        font-size: 0.85rem;
+        color: rgba(255, 255, 255, 0.7);
+    }
+    .helper-match-summary li {
+        padding: 0.2rem 0;
+    }
+    :global(.cm-search-highlight) {
+        background-color: rgba(250, 204, 21, 0.35);
+    }
+</style>
+
+<div class="search-panel">
+    <div class="search-mode-toggle">
+        <button
+            class:selected={searchMode === "text"}
+            type="button"
+            on:click={() => switchSearchMode("text")}
+        >
+            Text Search
+        </button>
+        <button
+            class:selected={searchMode === "helper"}
+            type="button"
+            on:click={() => switchSearchMode("helper")}
+        >
+            Helper Search
+        </button>
+    </div>
+    {#if searchMode === "text"}
+        <div class="text-search-controls">
+            <input
+                type="text"
+                placeholder="Search within request or response"
+                bind:value={searchQuery}
+            />
+            <label class="case-toggle">
+                <input
+                    type="checkbox"
+                    bind:checked={caseSensitiveSearch}
+                />
+                Case sensitive
+            </label>
+            <span class="hint">{textMatchCount} matches</span>
+        </div>
+    {:else}
+        <div class="helper-search-controls">
+            <textarea
+                rows="2"
+                bind:value={helperQuery}
+                placeholder='Helper expression, e.g. customFinder(request.body, "token")'
+            ></textarea>
+            <div class="helper-actions">
+                <button
+                    type="button"
+                    class="btn btn-sm variant-filled-primary"
+                    on:click={runHelperSearch}
+                >
+                    Highlight helper matches
+                </button>
+            </div>
+            {#if helperCompilationErrors.length}
+                <p class="error-label">
+                    Helper "{helperCompilationErrors[0].name}" failed to load:
+                    {helperCompilationErrors[0].message}
+                </p>
+            {/if}
+            {#if helperSearchError}
+                <p class="error-label">{helperSearchError}</p>
+            {/if}
+            {#if helperMatchesSummary.length}
+                <ul class="helper-match-summary">
+                    {#each helperMatchesSummary as summary}
+                        <li>
+                            <strong>{summary.name}</strong> — {summary.request}
+                            in request, {summary.response} in response
+                        </li>
+                    {/each}
+                </ul>
+            {/if}
+        </div>
+    {/if}
+</div>
+
 {#if requestBody || responseBody}
     <div class="flex flex-col sm:flex-row w-full">
         <div class="flex-1 p-1 overflow-auto">
             <CodeMirror
+                on:ready={(event) => {
+                    requestEditorView = event.detail;
+                    updateRequestEditorHighlights(requestHighlights);
+                }}
                 on:change={(event) => {
                     const text = event.detail;
                     if (
@@ -363,18 +742,28 @@
                 bind:value={requestBody}
                 lang={getLang(requestBody)}
                 theme={oneDark}
-                extensions={$marasiConfig.VimEnabled ? [vim()] : []}
+                extensions={[
+                    highlightField,
+                    ...($marasiConfig.VimEnabled ? [vim()] : []),
+                ]}
                 readonly={requestReadOnly}
                 lineWrapping={$lineWrap}
             ></CodeMirror>
         </div>
         <div class="flex-1 p-1 overflow-auto">
             <CodeMirror
+                on:ready={(event) => {
+                    responseEditorView = event.detail;
+                    updateResponseEditorHighlights(responseHighlights);
+                }}
                 class="text-xs"
                 bind:value={responseBody}
                 lang={getLang(responseBody)}
                 theme={oneDark}
-                extensions={$marasiConfig.VimEnabled ? [vim()] : []}
+                extensions={[
+                    highlightField,
+                    ...($marasiConfig.VimEnabled ? [vim()] : []),
+                ]}
                 readonly={responseReadOnly}
                 lineWrapping={$lineWrap}
             ></CodeMirror>

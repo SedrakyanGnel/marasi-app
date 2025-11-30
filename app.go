@@ -341,6 +341,16 @@ func (a *App) GetRawDetails(id uuid.UUID) marasi.Row {
 	row, err := a.Proxy.Repo.GetRaw(id)
 	if err != nil {
 		log.Print(err)
+		return marasi.Row{}
+	}
+	// Some repositories omit the raw response during the lightweight GetRaw query,
+	// so fetch the full response separately to populate the Raw field for helpers/search.
+	if len(row.Response.Raw) == 0 {
+		if response, respErr := a.Proxy.Repo.GetResponse(id); respErr == nil {
+			row.Response.Raw = response.Raw
+		} else {
+			log.Printf("fetching response raw for %s: %v", id, respErr)
+		}
 	}
 	return row
 }
